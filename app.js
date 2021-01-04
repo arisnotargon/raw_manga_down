@@ -4,8 +4,7 @@ const cheerio = require('cheerio');
 const fs = require('fs');
 const path = require("path");
 const axios = require('axios');
-
-// const request = require("request");
+const puppeteer = require('puppeteer');
 
 let args = require('minimist')(process.argv.slice(2));
 
@@ -22,10 +21,85 @@ if (targetUrl.length < 1) {
   exit();
 }
 
-const puppeteer = require('puppeteer');
-const { resolve } = require('path');
-const { get } = require('http');
+let downLoadQueue = [];
+let downLoadFailedQueue = [];
 
+
+const getChapter = async (chapterTitle, link, browser, mangaTilePath) => {
+  console.log('=======开始获取章节:*',chapterTitle, '*图片列表==========');
+  let chapterPath = path.join(mangaTilePath, chapterTitle);
+  if (!fs.existsSync(chapterPath)) {
+    await fs.mkdir(chapterPath, err => {
+      if (err) {
+        console.log(err);
+      }
+    })
+  }
+  const page = await browser.newPage();
+  await page.goto(link, { timeout: 0 });
+  let c = await page.content();
+  const $ = cheerio.load(c);
+  let picNodes = $('.page-break>img');
+
+  picNodes.each(
+    (index, ele) => {
+      ele = $(ele);
+      let attr = ele.attr();
+      downLoadQueue.push({
+        picPath: path.join(chapterPath, attr.id.trim().replace(/[\/\\\:\*\?\"\<\>\|\s+]/g, '_') + '.jpg'),
+        url: attr['data-src'].trim()
+      });
+    }
+  );
+  console.log('=======章节:*',chapterTitle, '*图片列表获取成功==========');
+
+  await page.close();
+}
+
+const downLoad = async (fpath, url) => {
+  return new Promise((resolve,reject) => {
+    axios.get(url).then(response => {
+      fs.writeFileSync(fpath, response.data);
+      console.log('文件*=' + fpath + '=*下载成功');
+      resolve();
+    }).catch(err => {
+      console.log('文件*=' + fpath + '=*下载失败,正在重试',url,typeof url,err);
+      downLoadFailedQueue.push({
+        picPath: fpath,
+        url: url
+      });
+      resolve();
+    });
+  });
+}
+
+// 下载列表中的全部图片,递归处理失败
+const downLoadAll = async () => {
+  let counter = 0;
+  let downLoadPromiseChunk = [];
+  for(const element of downLoadQueue) {
+    // console.log(element,element.url,typeof element.url);
+    // exit();
+    counter++;
+    downLoadPromiseChunk.push(downLoad(element.picPath, element.url));
+    if (counter === 5) {
+      await Promise.all(downLoadPromiseChunk);
+      downLoadPromiseChunk = [];
+    }
+  }
+
+  if (downLoadPromiseChunk.length > 0) {
+    await Promise.all(downLoadPromiseChunk);
+  }
+
+  if (downLoadFailedQueue.length > 1) {
+    downLoadQueue = downLoadFailedQueue;
+    downLoadFailedQueue = [];
+    await downLoadAll();
+  }
+}
+
+// 主函数
 (async () => {
   const browser = await puppeteer.launch({
     args: ['--no-sandbox'],
@@ -69,49 +143,24 @@ const { get } = require('http');
     }
   }
 
+  if (chapterPromiseChunk.length > 0) {
+    await Promise.all(chapterPromiseChunk);
+  }
+
+  // fs.writeFileSync(__dirname + '/test.js', `'use strict';\n\n module.exports = ${JSON.stringify(downLoadQueue)}`, {
+  //   cwd: __dirname,
+  //   encoding: 'utf8',
+  //   stdio: [process.stdin, process.stdout, process.stderr]
+  // });
+
   await browser.close();
+
+  // downLoadQueue = require('./test.js');
+  // console.log(downLoadQueue.length);
+  // exit();
+
+  // TODO: download
+  await downLoadAll();
 })();
 
-let getChapter = async (chapterTitle, link, browser, mangaTilePath) => {
-  let chapterPath = path.join(mangaTilePath, chapterTitle);
-  if (!fs.existsSync(chapterPath)) {
-    await fs.mkdir(chapterPath, err => {
-      if (err) {
-        console.log(err);
-      }
-    })
-  }
-  const page = await browser.newPage();
-  await page.goto(link);
-  let c = await page.content();
-  const $ = cheerio.load(c);
-  let picNodes = $('.page-break>img');
-  let donwloadPromiseChunk = [];
-  picNodes.each(
-    (index, ele) => {
-      ele = $(ele);
-      let attr = ele.attr();
 
-      let fname = attr.id.trim().replace(/[\/\\\:\*\?\"\<\>\|\s+]/g, '_');
-      let src = attr['data-src'].trim();
-      donwloadPromiseChunk.push(new Promise((res, rej) => downloadImg(path.join(chapterPath, fname + '.jpg'), src, res)));
-    }
-  );
-  await page.close();
-  await Promise.all(donwloadPromiseChunk)
-}
-
-let downloadImg = async (fpath, url, res) => {
-  axios({
-    url,
-    responseType: "arraybuffer"
-  }).then(({ data }) => {
-    fs.writeFileSync(fpath, data, "binary");
-    console.log("文件[" + fpath + "]下载完毕");
-    res();
-  }).catch(err=>{
-    // retry
-    console.log(err, "文件[" + fpath + "]下载失败,正在重试");
-    downloadImg(fpath, url, res);
-  })
-}
